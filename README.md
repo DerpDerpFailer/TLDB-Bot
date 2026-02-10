@@ -1,4 +1,3 @@
-# TaL-Items-Linker
 # Questlog Item Bot (Discord)
 
 A simple Discord bot written in **Python** that allows you to search for **Throne and Liberty items** from **Questlog.gg** and display them in a clean Discord embed.
