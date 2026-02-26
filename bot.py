@@ -1,5 +1,4 @@
 import os
-import re
 import requests
 from bs4 import BeautifulSoup
 import discord
@@ -13,83 +12,84 @@ from threading import Thread
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-INTENTS = discord.Intents.default()
-bot = discord.Client(intents=INTENTS)
+intents = discord.Intents.default()
+bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
-BASE_URL = "https://questlog.gg"
-
 # ==============================
-# QUESTLOG SCRAPER (URL ONLY)
+# TLDB SCRAPER
 # ==============================
 
-def extract_item_id_from_url(url: str):
-    """
-    Extract item ID from full Questlog URL.
-    Example:
-    https://questlog.gg/throne-and-liberty/en/db/item/wand_aa_t3_normal_002
-    """
-    match = re.search(r"/db/item/([a-zA-Z0-9_]+)", url)
-    if match:
-        return match.group(1)
-    return None
-
-
-def fetch_item_data(item_url: str):
+def fetch_tldb_item(url: str):
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
 
-    response = requests.get(item_url, headers=headers)
-
-    if response.status_code != 200:
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Request error: {e}")
         return None
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    # Title
-    title = soup.find("h1")
-    if not title:
+    # ======================
+    # Item Name (REAL NAME)
+    # ======================
+    title_tag = soup.find("h1")
+    if not title_tag:
+        print("No <h1> found.")
         return None
 
-    item_name = title.text.strip()
+    item_name = title_tag.text.strip()
 
-    # Try to get description (optional)
+    # ======================
+    # Item Image
+    # ======================
+    image_tag = soup.find("meta", property="og:image")
+    image_url = image_tag["content"] if image_tag else None
+
+    # ======================
+    # Description (optional)
+    # ======================
     description = ""
+
     desc_block = soup.find("div", class_="description")
     if desc_block:
         description = desc_block.text.strip()
 
+    # fallback if no description div
+    if not description:
+        meta_desc = soup.find("meta", property="og:description")
+        if meta_desc:
+            description = meta_desc["content"]
+
     return {
         "name": item_name,
+        "image": image_url,
         "description": description,
-        "url": item_url
+        "url": url
     }
 
 # ==============================
 # DISCORD COMMAND
 # ==============================
 
-@tree.command(name="item", description="Get item info from a Questlog URL")
-@app_commands.describe(url="Full Questlog item URL")
+@tree.command(name="item", description="Get item info from a TLDB URL")
+@app_commands.describe(url="Full TLDB item URL (https://tldb.info/db/item/...)")
 async def item(interaction: discord.Interaction, url: str):
 
     await interaction.response.defer()
 
-    if "questlog.gg" not in url:
-        await interaction.followup.send("❌ Please provide a valid Questlog URL.")
+    if not url.startswith("https://tldb.info/db/item/"):
+        await interaction.followup.send("❌ Please provide a valid TLDB item URL.")
         return
 
-    item_id = extract_item_id_from_url(url)
-
-    if not item_id:
-        await interaction.followup.send("❌ Invalid item URL format.")
-        return
-
-    data = fetch_item_data(url)
+    data = fetch_tldb_item(url)
 
     if not data:
-        await interaction.followup.send("❌ Could not fetch item data.")
+        await interaction.followup.send("❌ Could not fetch item data from TLDB.")
         return
 
     embed = discord.Embed(
@@ -99,7 +99,10 @@ async def item(interaction: discord.Interaction, url: str):
         color=0x5865F2
     )
 
-    embed.set_footer(text="Data from Questlog.gg")
+    if data["image"]:
+        embed.set_thumbnail(url=data["image"])
+
+    embed.set_footer(text="Data from TLDB.info")
 
     await interaction.followup.send(embed=embed)
 
@@ -110,14 +113,14 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 # ==============================
-# FLASK KEEP-ALIVE (RENDER)
+# FLASK (RENDER KEEP-ALIVE)
 # ==============================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Questlog Item Bot is running!"
+    return "TLDB Item Bot is running!"
 
 def run_discord():
     bot.run(TOKEN)
@@ -127,9 +130,7 @@ def run_discord():
 # ==============================
 
 if __name__ == "__main__":
-    # Start Discord in separate thread
     Thread(target=run_discord).start()
 
-    # Start Flask in main thread
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
