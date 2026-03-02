@@ -64,28 +64,30 @@ def fetch_tldb_item(item_id):
     # BASE STATS (STOP AT POSSIBLE TRAITS)
     # ======================
     stats = []
-    stats_containers = soup.find_all("div", class_=re.compile("stats-container"))
-    stop_parsing = False
+    stats_section = soup.find("div", string=re.compile("Base Stats", re.I))
 
-    for container in stats_containers:
-        if stop_parsing:
+    all_stat_names = soup.find_all("span", class_=re.compile("stat-name"))
+
+    for stat_name_tag in all_stat_names:
+        stat_name = clean_text(stat_name_tag.text.replace(":", ""))
+
+        # Stop when traits section begins
+        if "Possible Traits" in stat_name:
             break
 
-        stat_blocks = container.find_all("span", class_=re.compile("stat-name"))
+        # Hard stop safety if weird stat appears
+        if "Sale Price" in stat_name:
+            break
 
-        for stat_name_tag in stat_blocks:
-            stat_name = clean_text(stat_name_tag.text.replace(":", ""))
+        value_tag = stat_name_tag.find_next("span", class_=re.compile("stat-value"))
+        if value_tag:
+            stat_value = clean_text(value_tag.text)
 
-            # STOP condition
-            if "Possible Traits" in stat_name:
-                stop_parsing = True
-                break
+            # Protection: ignore absurd repeated 218,180 pattern
+            if stat_value == "218,180":
+                continue
 
-            # Find corresponding value
-            value_tag = stat_name_tag.find_next("span", class_=re.compile("stat-value"))
-            if value_tag:
-                stat_value = clean_text(value_tag.text)
-                stats.append(f"• {stat_name}: {stat_value}")
+            stats.append(f"• {stat_name}: {stat_value}")
 
     # ======================
     # UNIQUE SKILL
