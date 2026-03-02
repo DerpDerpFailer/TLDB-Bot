@@ -1,76 +1,78 @@
 import os
 import re
-import asyncio
+import json
 import time
+import asyncio
+import threading
 import requests
 from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+ITEMS_PATH = "/app/data/items.json"
+ITEMS_REFRESH_HOURS = 24
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 # ==========================
-# SIMPLE CACHE (TTL 5 min)
+# ITEMS LIST (chargée en RAM)
 # ==========================
-_search_cache: dict[str, tuple[list, float]] = {}
-CACHE_TTL = 300  # secondes
+_items: list[dict] = []         # [{id, name}]
+_items_loaded_at: float = 0.0
 
 
-def clean_text(text):
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-# ==========================
-# RECHERCHE D'ITEMS PAR NOM
-# ==========================
-def search_items(query: str) -> list[dict]:
-    """Cherche des items par nom sur tldb.info. Retourne [{name, id}]."""
-    if len(query) < 2:
-        return []
-
-    cache_key = query.lower()
-    if cache_key in _search_cache:
-        results, ts = _search_cache[cache_key]
-        if time.time() - ts < CACHE_TTL:
-            return results
-
-    url = "https://tldb.info/db/items/page/1"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    params = {"search": query}
-
+def load_items_from_disk() -> None:
+    """Charge items.json en mémoire."""
+    global _items, _items_loaded_at
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=5)
-        response.raise_for_status()
-    except requests.exceptions.RequestException:
-        return []
+        with open(ITEMS_PATH, "r", encoding="utf-8") as f:
+            _items = json.load(f)
+        _items_loaded_at = time.time()
+        print(f"Loaded {len(_items)} items from {ITEMS_PATH}")
+    except Exception as e:
+        print(f"Warning: could not load items list: {e}")
+        _items = []
 
-    soup = BeautifulSoup(response.text, "lxml")
 
-    results = []
-    seen_ids = set()
+def refresh_items_if_needed() -> None:
+    """Re-lance fetch_items.mjs si le cache est trop vieux (>24h)."""
+    age_hours = (time.time() - _items_loaded_at) / 3600
+    if age_hours < ITEMS_REFRESH_HOURS:
+        return
 
-    # Les items sont dans des liens de la forme /db/item/{id}
-    for link in soup.find_all("a", href=re.compile(r"^/db/item/[^/]+")):
-        href = link.get("href", "")
-        item_id = href.split("/db/item/")[-1].strip("/")
-        item_name = clean_text(link.get_text())
+    print(f"Item list is {age_hours:.1f}h old, refreshing...")
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["node", "/app/fetch_items.mjs"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            load_items_from_disk()
+            print("Item list refreshed successfully.")
+        else:
+            print(f"fetch_items.mjs failed: {result.stderr}")
+    except Exception as e:
+        print(f"Could not refresh items: {e}")
 
-        if item_id and item_name and item_id not in seen_ids:
-            seen_ids.add(item_id)
-            results.append({"name": item_name, "id": item_id})
 
-    results = results[:25]
-    _search_cache[cache_key] = (results, time.time())
-    return results
+def search_items_local(query: str) -> list[dict]:
+    """Filtre la liste en RAM — insensible à la casse, recherche partielle."""
+    refresh_items_if_needed()
+    q = query.lower()
+    return [item for item in _items if q in item["name"].lower()][:25]
 
 
 # ==========================
 # FETCH ITEM DETAILS
 # ==========================
+def clean_text(text):
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def fetch_tldb_item(item_id: str) -> dict | None:
     url = f"https://tldb.info/db/item/{item_id}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -83,13 +85,11 @@ def fetch_tldb_item(item_id: str) -> dict | None:
 
     soup = BeautifulSoup(response.text, "lxml")
 
-    # NAME
     name_tag = soup.find("h1")
     if not name_tag:
         return None
     item_name = clean_text(name_tag.text)
 
-    # ICON
     image_url = None
     header = soup.find("div", class_=re.compile("item-header"))
     if header:
@@ -97,19 +97,16 @@ def fetch_tldb_item(item_id: str) -> dict | None:
         if img and img.get("src"):
             image_url = img["src"]
 
-    # RARITY
     rarity = "Unknown"
     rarity_tag = soup.find("span", class_=re.compile("item-header-rarity-name"))
     if rarity_tag:
         rarity = clean_text(rarity_tag.text)
 
-    # DESCRIPTION
     description = ""
     desc_tag = soup.find("h2", class_="item-description")
     if desc_tag:
         description = clean_text(desc_tag.text)
 
-    # BASE STATS
     stats = []
     base_stats_text = soup.find(string=re.compile("Base Stats", re.I))
     if base_stats_text:
@@ -123,11 +120,9 @@ def fetch_tldb_item(item_id: str) -> dict | None:
                     stat_name = clean_text(current.text.replace(":", ""))
                     value_tag = current.find_next("span", class_=re.compile("stat-value"))
                     if value_tag:
-                        stat_value = clean_text(value_tag.text)
-                        stats.append(f"• {stat_name}: {stat_value}")
+                        stats.append(f"• {stat_name}: {clean_text(value_tag.text)}")
             current = current.find_next()
 
-    # UNIQUE SKILL
     skill_name = ""
     skill_desc = ""
     skill_title = soup.find("span", class_=re.compile("text-accent"))
@@ -157,8 +152,7 @@ def fetch_tldb_item(item_id: str) -> dict | None:
 async def item_command(interaction: discord.Interaction, item_name: str):
     await interaction.response.defer()
 
-    # item_name contient l'ID quand sélectionné via autocomplete,
-    # ou le texte brut sinon — on tente les deux
+    # item_name = l'ID de l'item quand sélectionné via autocomplete
     data = fetch_tldb_item(item_name)
 
     if not data:
@@ -183,16 +177,12 @@ async def item_command(interaction: discord.Interaction, item_name: str):
         embed.add_field(name="Description", value=data["description"], inline=False)
 
     if data["stats"]:
-        embed.add_field(
-            name="⚔ Base Stats",
-            value="\n".join(data["stats"]),
-            inline=False
-        )
+        embed.add_field(name="⚔ Base Stats", value="\n".join(data["stats"]), inline=False)
 
     if data["skill_name"]:
         embed.add_field(
             name=f"✨ Unique Skill — {data['skill_name']}",
-            value=data["skill_desc"] if data["skill_desc"] else "Pas de description",
+            value=data["skill_desc"] or "Pas de description",
             inline=False
         )
 
@@ -206,18 +196,17 @@ async def item_command(interaction: discord.Interaction, item_name: str):
 @item_command.autocomplete("item_name")
 async def item_autocomplete(
     interaction: discord.Interaction,
-    current: str
+    current: str,
 ) -> list[app_commands.Choice[str]]:
     if len(current) < 2:
         return []
 
-    # Appel bloquant dans un thread pour ne pas bloquer la boucle asyncio
     loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(None, search_items, current)
+    results = await loop.run_in_executor(None, search_items_local, current)
 
     return [
         app_commands.Choice(
-            name=r["name"][:100],  # Discord limite à 100 chars
+            name=r["name"][:100],
             value=r["id"]
         )
         for r in results
@@ -229,11 +218,14 @@ async def item_autocomplete(
 # ==========================
 @client.event
 async def on_ready():
+    load_items_from_disk()
+
     try:
         synced = await tree.sync()
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(e)
+
     print(f"Logged in as {client.user}")
 
 
