@@ -60,29 +60,27 @@ def fetch_tldb_item(item_id):
     if desc_tag:
         description = clean_text(desc_tag.text)
 
-# ======================
-# BASE STATS (STRICT SECTION PARSING)
-# ======================
-stats = []
+    # ======================
+    # BASE STATS (STRICT SECTION PARSING)
+    # ======================
+    stats = []
 
-# Find the Base Stats header
-base_stats_header = soup.find("h3", string=re.compile("Base Stats", re.I))
+    base_stats_header = soup.find("h3", string=re.compile("Base Stats", re.I))
 
-if base_stats_header:
-    # The stats are usually in the next sibling container
-    stats_container = base_stats_header.find_next("div")
+    if base_stats_header:
+        stats_container = base_stats_header.find_next("div")
 
-    if stats_container:
-        stat_rows = stats_container.find_all("div", class_=re.compile("stat"))
+        if stats_container:
+            stat_rows = stats_container.find_all("div", class_=re.compile("stat"))
 
-        for row in stat_rows:
-            name_tag = row.find("span", class_=re.compile("stat-name"))
-            value_tag = row.find("span", class_=re.compile("stat-value"))
+            for row in stat_rows:
+                name_tag = row.find("span", class_=re.compile("stat-name"))
+                value_tag = row.find("span", class_=re.compile("stat-value"))
 
-            if name_tag and value_tag:
-                stat_name = clean_text(name_tag.text.replace(":", ""))
-                stat_value = clean_text(value_tag.text)
-                stats.append(f"• {stat_name}: {stat_value}")
+                if name_tag and value_tag:
+                    stat_name = clean_text(name_tag.text.replace(":", ""))
+                    stat_value = clean_text(value_tag.text)
+                    stats.append(f"• {stat_name}: {stat_value}")
 
     # ======================
     # UNIQUE SKILL
