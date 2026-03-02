@@ -60,34 +60,29 @@ def fetch_tldb_item(item_id):
     if desc_tag:
         description = clean_text(desc_tag.text)
 
-    # ======================
-    # BASE STATS (STOP AT POSSIBLE TRAITS)
-    # ======================
-    stats = []
-    stats_section = soup.find("div", string=re.compile("Base Stats", re.I))
+# ======================
+# BASE STATS (STRICT SECTION PARSING)
+# ======================
+stats = []
 
-    all_stat_names = soup.find_all("span", class_=re.compile("stat-name"))
+# Find the Base Stats header
+base_stats_header = soup.find("h3", string=re.compile("Base Stats", re.I))
 
-    for stat_name_tag in all_stat_names:
-        stat_name = clean_text(stat_name_tag.text.replace(":", ""))
+if base_stats_header:
+    # The stats are usually in the next sibling container
+    stats_container = base_stats_header.find_next("div")
 
-        # Stop when traits section begins
-        if "Possible Traits" in stat_name:
-            break
+    if stats_container:
+        stat_rows = stats_container.find_all("div", class_=re.compile("stat"))
 
-        # Hard stop safety if weird stat appears
-        if "Sale Price" in stat_name:
-            break
+        for row in stat_rows:
+            name_tag = row.find("span", class_=re.compile("stat-name"))
+            value_tag = row.find("span", class_=re.compile("stat-value"))
 
-        value_tag = stat_name_tag.find_next("span", class_=re.compile("stat-value"))
-        if value_tag:
-            stat_value = clean_text(value_tag.text)
-
-            # Protection: ignore absurd repeated 218,180 pattern
-            if stat_value == "218,180":
-                continue
-
-            stats.append(f"• {stat_name}: {stat_value}")
+            if name_tag and value_tag:
+                stat_name = clean_text(name_tag.text.replace(":", ""))
+                stat_value = clean_text(value_tag.text)
+                stats.append(f"• {stat_name}: {stat_value}")
 
     # ======================
     # UNIQUE SKILL
