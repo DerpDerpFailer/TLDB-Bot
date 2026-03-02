@@ -60,30 +60,37 @@ def fetch_tldb_item(item_id):
     if desc_tag:
         description = clean_text(desc_tag.text)
 
-# ======================
-# BASE STATS (ROBUST VERSION)
-# ======================
-stats = []
+    # ======================
+    # BASE STATS (STABLE VERSION)
+    # ======================
+    stats = []
 
-base_stats_label = soup.find(string=re.compile("Base Stats", re.I))
+    # Find "Base Stats" text anywhere
+    base_stats_text = soup.find(string=re.compile("Base Stats", re.I))
 
-if base_stats_label:
-    # Remonter au conteneur parent
-    base_container = base_stats_label.find_parent()
+    if base_stats_text:
+        # Find the closest section container
+        base_section = base_stats_text.find_parent()
 
-    # Le vrai bloc stats est généralement juste après
-    stats_container = base_container.find_next("div")
+        # Loop through elements after Base Stats until next header
+        current = base_section.find_next()
 
-    if stats_container:
-        stat_names = stats_container.find_all("span", class_=re.compile("stat-name"))
+        while current:
+            # Stop if we reach another section like Possible Traits
+            if current.name in ["h2", "h3"] and "Base Stats" not in current.text:
+                break
 
-        for stat_name_tag in stat_names:
-            stat_name = clean_text(stat_name_tag.text.replace(":", ""))
+            if current.name == "span" and current.get("class"):
+                if any("stat-name" in c for c in current.get("class")):
+                    stat_name = clean_text(current.text.replace(":", ""))
+                    value_tag = current.find_next(
+                        "span", class_=re.compile("stat-value")
+                    )
+                    if value_tag:
+                        stat_value = clean_text(value_tag.text)
+                        stats.append(f"• {stat_name}: {stat_value}")
 
-            value_tag = stat_name_tag.find_next("span", class_=re.compile("stat-value"))
-            if value_tag:
-                stat_value = clean_text(value_tag.text)
-                stats.append(f"• {stat_name}: {stat_value}")
+            current = current.find_next()
 
     # ======================
     # UNIQUE SKILL
@@ -95,7 +102,9 @@ if base_stats_label:
     if skill_title:
         skill_name = clean_text(skill_title.text)
 
-        skill_description = soup.find("span", class_=re.compile("unique-skill-description"))
+        skill_description = soup.find(
+            "span", class_=re.compile("unique-skill-description")
+        )
         if skill_description:
             skill_desc = clean_text(skill_description.text)
 
@@ -107,7 +116,7 @@ if base_stats_label:
         "skill_name": skill_name,
         "skill_desc": skill_desc,
         "url": url,
-        "image": image_url
+        "image": image_url,
     }
 
 
