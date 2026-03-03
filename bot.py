@@ -165,6 +165,18 @@ def build_embed(data: dict, item_id: str) -> discord.Embed:
         desc_clean = re.sub(r"<[^>]+>", "", raw_desc)
         embed.add_field(name="📖 Description", value=desc_clean, inline=False)
 
+    # EU Auction House prices
+    eu_prices = data.get("eu_prices", {})
+    if eu_prices:
+        lines = []
+        for server, entry in eu_prices.items():
+            if entry:
+                price_fmt = f"{entry['price']:,}".replace(",", " ")
+                lines.append(f"**{server}** — {price_fmt} ◈ ×{entry['quantity']}")
+            else:
+                lines.append(f"**{server}** — Not listed")
+        embed.add_field(name="🏪 Auction House (EU)", value="\n".join(lines), inline=False)
+
     return embed
 
 
