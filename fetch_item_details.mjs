@@ -89,12 +89,67 @@ function computeStatAtLevel(stat, level) {
   return stat.value + bonus;
 }
 
+// ── Parse main stats at enchant level 12 ─────────────────────────────────────
+// Damage stats need special handling: min = attack_power, max = attack_power + bonus_attack_power
+
+function buildMainStats(statList) {
+  if (!Array.isArray(statList)) return [];
+
+  const statMap = {};
+  for (const s of statList) {
+    statMap[s.key] = computeStatAtLevel(s, ENCHANT_LEVEL);
+  }
+
+  const results = [];
+  const handled = new Set();
+
+  // Pair attack_power + bonus into a min~max range
+  const damagePairs = [
+    ["attack_power_main_hand",  "bonus_attack_power_main_hand",  "Damage"],
+    ["attack_power_off_hand",   "bonus_attack_power_off_hand",   "Off-Hand Damage"],
+  ];
+
+  for (const [mainKey, bonusKey, label] of damagePairs) {
+    if (statMap[mainKey] !== undefined) {
+      const min = statMap[mainKey];
+      const max = statMap[bonusKey] !== undefined
+        ? statMap[mainKey] + statMap[bonusKey]
+        : null;
+
+      const stat = statList.find(s => s.key === mainKey);
+      const minFmt = formatValue(min, stat.format, stat.multiply);
+      const maxFmt = max !== null ? formatValue(max, stat.format, stat.multiply) : null;
+
+      results.push({
+        key: mainKey,
+        name: label,
+        value: maxFmt ? `${minFmt} ~ ${maxFmt}` : minFmt,
+      });
+      handled.add(mainKey);
+      handled.add(bonusKey);
+    }
+  }
+
+  // All other stats (Attack Speed, Range, etc.)
+  for (const stat of statList) {
+    if (handled.has(stat.key)) continue;
+    const raw = computeStatAtLevel(stat, ENCHANT_LEVEL);
+    results.push({
+      key: stat.key,
+      name: stat.name,
+      value: formatValue(raw, stat.format, stat.multiply),
+    });
+  }
+
+  return results;
+}
+
 function parseStatGroup(statList) {
   if (!Array.isArray(statList)) return [];
   return statList.map((stat) => ({
     key: stat.key,
     name: stat.name,
-    value: formatValue(computeStatAtLevel(stat, 12), stat.format, stat.multiply),
+    value: formatValue(computeStatAtLevel(stat, ENCHANT_LEVEL), stat.format, stat.multiply),
   }));
 }
 
@@ -117,7 +172,7 @@ process.stdout.write(JSON.stringify({
       ? skill.description.join("")
       : skill.description ?? "",
   } : null,
-  main_stats: parseStatGroup(stats.main_stats),
+  main_stats: buildMainStats(stats.main_stats),
   extra_stats: parseStatGroup(stats.extra_fixed_stats),
   enchant_level: 12,
   eu_prices,
