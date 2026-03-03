@@ -4,7 +4,6 @@ import json
 import time
 import asyncio
 import subprocess
-import requests
 import discord
 from discord import app_commands
 
@@ -12,13 +11,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 ITEMS_PATH = "/app/data/items.json"
 ITEMS_REFRESH_HOURS = 24
 
-# Rarity colors for embed
-RARITY_COLORS = {
-    10: 0xE040FB,  # Epic (purple)
-    11: 0xE040FB,  # Epic II
-    12: 0xE040FB,  # Epic III
-    9:  0x42A5F5,  # Rare (blue)
-    8:  0x66BB6A,  # Uncommon (green)
+# Rarity config: color + emoji + label
+RARITY_CONFIG = {
+    7:  (0x9E9E9E, "⬜", "Common"),
+    8:  (0x4CAF50, "🟩", "Uncommon"),
+    9:  (0x2196F3, "🟦", "Rare"),
+    10: (0xAB47BC, "🟪", "Epic"),
+    11: (0x7B1FA2, "💜", "Epic II"),
+    12: (0x4A148C, "💎", "Epic III"),
 }
 
 ICON_BASE_URL = "https://cdn.tldb.info/db/images/ags/v41/128/image/"
@@ -71,7 +71,6 @@ def search_items_local(query: str) -> list[dict]:
 # ── Fetch item details via Node.js ───────────────────────────────────────────
 
 def fetch_tldb_item(item_id: str) -> dict | None:
-    """Call fetch_item_details.mjs and return parsed JSON."""
     try:
         result = subprocess.run(
             ["node", "/app/fetch_item_details.mjs", item_id],
@@ -86,30 +85,35 @@ def fetch_tldb_item(item_id: str) -> dict | None:
         return None
 
 
-# ── Format stat value ─────────────────────────────────────────────────────────
-
-def fmt(stat: dict) -> str:
-    return f"{stat['name']}: {stat['value']}"
-
-
 # ── Build Discord embed ───────────────────────────────────────────────────────
 
 def build_embed(data: dict, item_id: str) -> discord.Embed:
     rarity_num = data.get("rarity", 0)
-    color = RARITY_COLORS.get(rarity_num, discord.Color.blurple().value)
-
-    # Rarity label from rarity number
-    rarity_labels = {10: "Epic", 11: "Epic II", 12: "Epic III",
-                     9: "Rare", 8: "Uncommon", 7: "Common"}
-    rarity_label = rarity_labels.get(rarity_num, f"Rarity {rarity_num}")
+    color, rarity_emoji, rarity_label = RARITY_CONFIG.get(
+        rarity_num, (0x5865F2, "🔹", f"Rarity {rarity_num}")
+    )
     item_type = data.get("type", "")
-
     url = f"https://tldb.info/db/item/{item_id}"
+
+    # ── AH price (pour la description header) ────────────────────────────────
+    eu_prices = data.get("eu_prices", {})
+    listed = {s: e for s, e in eu_prices.items() if e and e["quantity"] > 0}
+    if listed:
+        best = min(listed.values(), key=lambda e: e["price"])
+        price_fmt = f"{best['price']:,}".replace(",", " ")
+        ah_str = f"  ·  🏪 **{price_fmt} ◈** ×{best['quantity']}"
+    elif eu_prices:
+        ah_str = "  ·  🏪 *Not listed*"
+    else:
+        ah_str = ""
+
+    # Description de l'embed = rareté + type + prix AH sur une ligne
+    embed_desc = f"{rarity_emoji} **{rarity_label}** {item_type}{ah_str}"
 
     embed = discord.Embed(
         title=data["name"],
         url=url,
-        description=f"{rarity_label} {item_type}".strip(),
+        description=embed_desc,
         color=color
     )
 
@@ -119,20 +123,15 @@ def build_embed(data: dict, item_id: str) -> discord.Embed:
         icon_url = ICON_BASE_URL + icon_path.replace("Image/", "").lower() + ".png"
         embed.set_thumbnail(url=icon_url)
 
-    # Base Stats
+    # Base Stats — une seule ligne avec │
     main_stats = data.get("main_stats", [])
     if main_stats:
-        lines = [f"{s['name']}: {s['value']}" for s in main_stats]
-        embed.add_field(
-            name="⚔️ Base Stats (+12)",
-            value="\n".join(lines),
-            inline=False
-        )
+        value = " │ ".join(f"{s['name']}: {s['value']}" for s in main_stats)
+        embed.add_field(name="⚔️ Base Stats (+12)", value=value, inline=False)
 
     # Unique Skill
     skill = data.get("skill")
     if skill and skill.get("name"):
-        # Strip HTML tags from description
         desc = re.sub(r"<[^>]+>", "", skill.get("description", ""))
         embed.add_field(
             name=f"✨ {skill['name']}",
@@ -140,34 +139,17 @@ def build_embed(data: dict, item_id: str) -> discord.Embed:
             inline=False
         )
 
-    # Extra stats (Fortitude, Perception…)
+    # Extra stats — une seule ligne avec │
     extra_stats = data.get("extra_stats", [])
     if extra_stats:
-        embed.add_field(
-            name="📊 Stats (+12)",
-            value=" / ".join(fmt(s) for s in extra_stats),
-            inline=False
-        )
+        value = " │ ".join(f"{s['name']}: {s['value']}" for s in extra_stats)
+        embed.add_field(name="📊 Stats (+12)", value=value, inline=False)
 
     # Description
     raw_desc = data.get("description", "")
     if raw_desc:
         desc_clean = re.sub(r"<[^>]+>", "", raw_desc)
         embed.add_field(name="📖 Description", value=desc_clean, inline=False)
-
-    # EU Auction House prices — affiche uniquement le prix le plus bas
-    eu_prices = data.get("eu_prices", {})
-    listed = {s: e for s, e in eu_prices.items() if e and e["quantity"] > 0}
-    if listed:
-        best = min(listed.values(), key=lambda e: e["price"])
-        price_fmt = f"{best['price']:,}".replace(",", " ")
-        embed.add_field(
-            name="🏪 Auction House (EU)",
-            value=f"{price_fmt} ◈ ×{best['quantity']}",
-            inline=True
-        )
-    elif eu_prices:
-        embed.add_field(name="🏪 Auction House (EU)", value="Not listed", inline=True)
 
     return embed
 
