@@ -165,17 +165,19 @@ def build_embed(data: dict, item_id: str) -> discord.Embed:
         desc_clean = re.sub(r"<[^>]+>", "", raw_desc)
         embed.add_field(name="📖 Description", value=desc_clean, inline=False)
 
-    # EU Auction House prices
+    # EU Auction House prices — affiche uniquement le prix le plus bas
     eu_prices = data.get("eu_prices", {})
-    if eu_prices:
-        lines = []
-        for server, entry in eu_prices.items():
-            if entry:
-                price_fmt = f"{entry['price']:,}".replace(",", " ")
-                lines.append(f"**{server}** — {price_fmt} ◈ ×{entry['quantity']}")
-            else:
-                lines.append(f"**{server}** — Not listed")
-        embed.add_field(name="🏪 Auction House (EU)", value="\n".join(lines), inline=False)
+    listed = {s: e for s, e in eu_prices.items() if e and e["quantity"] > 0}
+    if listed:
+        best = min(listed.values(), key=lambda e: e["price"])
+        price_fmt = f"{best['price']:,}".replace(",", " ")
+        embed.add_field(
+            name="🏪 Auction House (EU)",
+            value=f"{price_fmt} ◈ ×{best['quantity']}",
+            inline=True
+        )
+    elif eu_prices:
+        embed.add_field(name="🏪 Auction House (EU)", value="Not listed", inline=True)
 
     return embed
 
