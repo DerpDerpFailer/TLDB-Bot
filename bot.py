@@ -5,7 +5,6 @@ import time
 import asyncio
 import subprocess
 import requests
-from bs4 import BeautifulSoup
 import discord
 from discord import app_commands
 
@@ -13,19 +12,25 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 ITEMS_PATH = "/app/data/items.json"
 ITEMS_REFRESH_HOURS = 24
 
+# Rarity colors for embed
+RARITY_COLORS = {
+    10: 0xE040FB,  # Epic (purple)
+    11: 0xE040FB,  # Epic II
+    12: 0xE040FB,  # Epic III
+    9:  0x42A5F5,  # Rare (blue)
+    8:  0x66BB6A,  # Uncommon (green)
+}
+
+ICON_BASE_URL = "https://cdn.tldb.info/db/images/ags/v41/128/image/"
+
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ==========================
-# ITEMS LIST (chargée en RAM)
-# ==========================
+# ── Items list (RAM cache) ────────────────────────────────────────────────────
+
 _items: list[dict] = []
 _items_loaded_at: float = 0.0
-
-
-def clean(text):
-    return re.sub(r'\s+', ' ', text).strip()
 
 
 def load_items_from_disk():
@@ -41,10 +46,9 @@ def load_items_from_disk():
 
 
 def refresh_items_if_needed():
-    age_hours = (time.time() - _items_loaded_at) / 3600
-    if age_hours < ITEMS_REFRESH_HOURS:
+    if (time.time() - _items_loaded_at) / 3600 < ITEMS_REFRESH_HOURS:
         return
-    print(f"Item list is {age_hours:.1f}h old, refreshing...")
+    print("Item list outdated, refreshing...")
     try:
         result = subprocess.run(
             ["node", "/app/fetch_items.mjs"],
@@ -64,185 +68,130 @@ def search_items_local(query: str) -> list[dict]:
     return [item for item in _items if q in item["name"].lower()][:25]
 
 
-# ==========================
-# FETCH + PARSE ITEM
-# ==========================
+# ── Fetch item details via Node.js ───────────────────────────────────────────
+
 def fetch_tldb_item(item_id: str) -> dict | None:
-    url = f"https://tldb.info/db/item/{item_id}"
+    """Call fetch_item_details.mjs and return parsed JSON."""
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        r.raise_for_status()
-    except requests.exceptions.RequestException:
+        result = subprocess.run(
+            ["node", "/app/fetch_item_details.mjs", item_id],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0 or not result.stdout:
+            print(f"fetch_item_details error: {result.stderr}")
+            return None
+        return json.loads(result.stdout)
+    except Exception as e:
+        print(f"fetch_tldb_item exception: {e}")
         return None
 
-    soup = BeautifulSoup(r.text, "lxml")
 
-    # ── NAME ──────────────────────────────────────────────
-    name_tag = soup.find("h1")
-    if not name_tag:
-        return None
-    item_name = clean(name_tag.text)
+# ── Format stat value ─────────────────────────────────────────────────────────
 
-    # ── IMAGE ─────────────────────────────────────────────
-    image_url = None
-    item_img = soup.find("div", class_=re.compile(r"\bitem-image\b"))
-    if item_img:
-        img = item_img.find("img")
-        if img and img.get("src"):
-            image_url = img["src"]
-
-    # ── RARITY ────────────────────────────────────────────
-    rarity = "Unknown"
-    rarity_tag = soup.find("span", class_="item-header-rarity-name")
-    if rarity_tag:
-        rarity = clean(rarity_tag.text)
-
-    # ── TYPE (Belt / Orb / Sword…) ────────────────────────
-    item_type = ""
-    # Le type est dans un span.text-truncate à l'intérieur du header
-    header = soup.find("div", class_=re.compile(r"\bitem-header\b"))
-    if header:
-        type_tag = header.find("span", class_="text-truncate")
-        if type_tag:
-            item_type = clean(type_tag.text)
-
-    # ── BASE STATS PRIMAIRES ───────────────────────────────
-    # Stat principale (grand affichage) : container-sub-panel avec flex-fill
-    primary_stats = []
-    for block in soup.find_all("div", class_=re.compile(r"\bflex-fill\b")):
-        name_el = block.find("span", class_=re.compile(r"\bstat-name\b"))
-        value_el = block.find("span", class_=re.compile(r"\bstat-value\b"))
-        if name_el and value_el:
-            primary_stats.append(f"{clean(name_el.text)} {clean(value_el.get_text())}")
-
-    # Stats secondaires de base (Attack Speed, Range) : stat-name w-50
-    for row in soup.find_all("span", class_=re.compile(r"\bstat-name\b.*\bw-50\b|\bw-50\b.*\bstat-name\b")):
-        stat_name = clean(row.text)
-        value_container = row.find_next_sibling("span", class_=re.compile(r"\bcontainer-sub-panel\b"))
-        if value_container:
-            stat_val = clean(value_container.get_text())
-            primary_stats.append(f"{stat_name} {stat_val}")
-
-    # ── STATS SECONDAIRES (Dexterity, Strength…) ──────────
-    # Dans container-sub-panel d-flex flex-column gap-0
-    # On s'arrête dès qu'on rencontre "Possible Traits"
-    secondary_stats = []
-    sec_container = soup.find("span", class_=re.compile(r"\bcontainer-sub-panel\b.*\bgap-0\b|\bgap-0\b.*\bcontainer-sub-panel\b"))
-    if sec_container:
-        for row in sec_container.children:
-            if not hasattr(row, 'get'):
-                continue
-            # Stop at "Possible Traits"
-            if "text-accent" in " ".join(row.get("class", [])):
-                break
-            name_el = row.find("span", class_=re.compile(r"\bstat-name\b"))
-            value_el = row.find("span", class_=re.compile(r"\bstat-value\b"))
-            if name_el and value_el:
-                stat_name = clean(name_el.text).rstrip(":")
-                stat_val = clean(value_el.get_text())
-                secondary_stats.append(f"{stat_name}: {stat_val}")
-
-    # ── UNIQUE SKILL ──────────────────────────────────────
-    # Ancre : div contenant unique-skill-icon
-    skill_name = ""
-    skill_desc = ""
-    skill_icon_div = soup.find("div", class_=re.compile(r"\bunique-skill-icon\b"))
-    if skill_icon_div:
-        skill_block = skill_icon_div.find_parent("div")
-        if skill_block:
-            name_el = skill_block.find("span", class_=re.compile(r"\btext-accent\b"))
-            desc_el = skill_block.find("span", class_=re.compile(r"\bunique-skill-description\b"))
-            if name_el:
-                skill_name = clean(name_el.text)
-            if desc_el:
-                skill_desc = clean(desc_el.text)
-
-    # ── DESCRIPTION ───────────────────────────────────────
-    description = ""
-    desc_tag = soup.find("h2", class_="item-description")
-    if desc_tag:
-        description = clean(desc_tag.get_text())
-
-    return {
-        "name": item_name,
-        "rarity": rarity,
-        "type": item_type,
-        "primary_stats": primary_stats,
-        "secondary_stats": secondary_stats,
-        "skill_name": skill_name,
-        "skill_desc": skill_desc,
-        "description": description,
-        "url": url,
-        "image": image_url,
-    }
+def fmt(stat: dict) -> str:
+    return f"{stat['name']}: {stat['value']}"
 
 
-# ==========================
-# SLASH COMMAND /item
-# ==========================
+# ── Build Discord embed ───────────────────────────────────────────────────────
+
+def build_embed(data: dict, item_id: str) -> discord.Embed:
+    rarity_num = data.get("rarity", 0)
+    color = RARITY_COLORS.get(rarity_num, discord.Color.blurple().value)
+
+    # Rarity label from rarity number
+    rarity_labels = {10: "Epic", 11: "Epic II", 12: "Epic III",
+                     9: "Rare", 8: "Uncommon", 7: "Common"}
+    rarity_label = rarity_labels.get(rarity_num, f"Rarity {rarity_num}")
+    item_type = data.get("type", "")
+
+    url = f"https://tldb.info/db/item/{item_id}"
+
+    embed = discord.Embed(
+        title=data["name"],
+        url=url,
+        description=f"{rarity_label} {item_type}".strip(),
+        color=color
+    )
+
+    # Icon
+    icon_path = data.get("icon", "")
+    if icon_path:
+        icon_url = ICON_BASE_URL + icon_path.replace("Image/", "") + ".png"
+        embed.set_thumbnail(url=icon_url)
+
+    # Base Stats (Damage, Attack Speed, Range…)
+    main_stats = data.get("main_stats", [])
+    if main_stats:
+        # Group Damage min/max on one line, rest separately
+        damage_parts = [s for s in main_stats if "damage" in s["key"].lower()]
+        other_main = [s for s in main_stats if "damage" not in s["key"].lower()]
+
+        lines = []
+        if damage_parts:
+            vals = [s["value"] for s in damage_parts]
+            lines.append(f"Damage: {' ~ '.join(vals)}")
+        for s in other_main:
+            lines.append(fmt(s))
+
+        embed.add_field(
+            name=f"⚔️ Base Stats (+12)",
+            value="\n".join(lines),
+            inline=False
+        )
+
+    # Unique Skill
+    skill = data.get("skill")
+    if skill and skill.get("name"):
+        # Strip HTML tags from description
+        desc = re.sub(r"<[^>]+>", "", skill.get("description", ""))
+        embed.add_field(
+            name=f"✨ {skill['name']}",
+            value=desc or "No description",
+            inline=False
+        )
+
+    # Extra stats (Fortitude, Perception…)
+    extra_stats = data.get("extra_stats", [])
+    if extra_stats:
+        embed.add_field(
+            name="📊 Stats (+12)",
+            value=" / ".join(fmt(s) for s in extra_stats),
+            inline=False
+        )
+
+    # Description
+    raw_desc = data.get("description", "")
+    if raw_desc:
+        desc_clean = re.sub(r"<[^>]+>", "", raw_desc)
+        embed.add_field(name="📖 Description", value=desc_clean, inline=False)
+
+    embed.set_footer(text="Data from TLDB.info · Stats shown at +12")
+    return embed
+
+
+# ── Slash command ─────────────────────────────────────────────────────────────
+
 @tree.command(name="item", description="Rechercher un item TLDB par nom")
 @app_commands.describe(item_name="Commence à taper le nom de l'item...")
 async def item_command(interaction: discord.Interaction, item_name: str):
     await interaction.response.defer()
 
-    data = fetch_tldb_item(item_name)
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, fetch_tldb_item, item_name)
+
     if not data:
         await interaction.followup.send(
             f"❌ Item introuvable : `{item_name}`\n"
-            "💡 Utilise l'autocomplétion pour sélectionner un item dans la liste."
+            "💡 Utilise l'autocomplétion pour sélectionner un item."
         )
         return
 
-    # Titre : Nom — Rarity · Type
-    title_parts = [data["rarity"]]
-    if data["type"]:
-        title_parts.append(data["type"])
-
-    embed = discord.Embed(
-        title=data["name"],
-        url=data["url"],
-        description=" · ".join(title_parts),
-        color=discord.Color.blurple()
-    )
-
-    if data["image"]:
-        embed.set_thumbnail(url=data["image"])
-
-    # Base Stats
-    if data["primary_stats"]:
-        embed.add_field(
-            name="⚔️ Base Stats",
-            value=" / ".join(data["primary_stats"]),
-            inline=False
-        )
-
-    # Unique Skill
-    if data["skill_name"]:
-        embed.add_field(
-            name=f"✨ Unique Skill — {data['skill_name']}",
-            value=data["skill_desc"] or "Pas de description",
-            inline=False
-        )
-
-    # Stats secondaires
-    if data["secondary_stats"]:
-        embed.add_field(
-            name="📊 Stats",
-            value=" / ".join(data["secondary_stats"]),
-            inline=False
-        )
-
-    # Description
-    if data["description"]:
-        embed.add_field(name="📖 Description", value=data["description"], inline=False)
-
-    embed.set_footer(text="Data from TLDB.info")
+    embed = build_embed(data, item_name)
     await interaction.followup.send(embed=embed)
 
 
-# ==========================
-# AUTOCOMPLETE
-# ==========================
+# ── Autocomplete ──────────────────────────────────────────────────────────────
+
 @item_command.autocomplete("item_name")
 async def item_autocomplete(
     interaction: discord.Interaction,
@@ -258,9 +207,8 @@ async def item_autocomplete(
     ]
 
 
-# ==========================
-# EVENTS
-# ==========================
+# ── Events ────────────────────────────────────────────────────────────────────
+
 @client.event
 async def on_ready():
     load_items_from_disk()
