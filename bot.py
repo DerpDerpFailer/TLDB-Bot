@@ -201,7 +201,7 @@ async def on_ready():
         synced = await tree.sync()
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(e)
+        print(f"SYNC ERROR: {type(e).__name__}: {e}")
     print(f"Logged in as {client.user}")
 
 
